@@ -1,0 +1,12 @@
+node_modules/
+.npm-cache/
+dist/
+data/
+.env
+.env.*
+!.env.example
+*.sqlite*
+*.log
+output/
+.playwright-cli/
+.DS_Store

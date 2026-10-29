@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+node_modules
+.npm-cache
+dist
+data
+output
+.playwright-cli
+*.sqlite*
+*.log
+docs
+tests

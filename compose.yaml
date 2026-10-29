@@ -1,0 +1,17 @@
+services:
+  relayforge:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      DATABASE_PATH: /app/data/relayforge.sqlite
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - relayforge-data:/app/data
+    stop_grace_period: 20s
+
+volumes:
+  relayforge-data:

@@ -1,22 +1,33 @@
 {
   "name": "relayforge",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "A durable webhook delivery platform with retries, signing, and an operations dashboard.",
+  "description": "A Spring Boot webhook delivery platform with a React dashboard and Vue receiver demo.",
   "type": "module",
   "engines": {
     "node": ">=24.0.0 <25"
   },
   "scripts": {
-    "dev": "node --env-file-if-exists=.env --import tsx server/index.ts",
+    "dev": "mvn -f java/pom.xml spring-boot:run",
     "dev:web": "vite --host 127.0.0.1",
-    "build": "tsc -p tsconfig.server.json && vite build",
-    "start": "node --env-file-if-exists=.env dist/server/index.js",
-    "worker": "node --env-file-if-exists=.env --import tsx server/worker-cli.ts",
+    "dev:receiver": "npm --prefix receiver-ui run dev",
+    "build:web": "tsc -p tsconfig.web.json --noEmit && vite build",
+    "build:receiver": "npm --prefix receiver-ui run build",
+    "build:java": "mvn -B -ntp -f java/pom.xml package",
+    "build": "npm run build:web && npm run build:receiver && npm run build:java",
+    "start": "java -jar java/target/relayforge-2.0.0.jar",
     "setup": "node scripts/setup.mjs",
-    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "test": "tsx --test tests/*.test.ts",
-    "check": "npm run typecheck && npm test && npm run build"
+    "typecheck:web": "tsc -p tsconfig.web.json --noEmit",
+    "typecheck": "npm run typecheck:web && npm --prefix receiver-ui run typecheck",
+    "test": "mvn -B -ntp -f java/pom.xml test",
+    "check": "npm test && npm run build:web && npm run build:receiver",
+    "dev:legacy": "node --env-file-if-exists=.env --import tsx server/index.ts",
+    "build:legacy": "tsc -p tsconfig.server.json && vite build",
+    "start:legacy": "node --env-file-if-exists=.env dist/server/index.js",
+    "worker:legacy": "node --env-file-if-exists=.env --import tsx server/worker-cli.ts",
+    "typecheck:legacy": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "test:legacy": "tsx --test tests/*.test.ts",
+    "check:legacy": "npm run typecheck:legacy && npm run test:legacy && npm run build:legacy"
   },
   "dependencies": {
     "@fastify/helmet": "^13.2.0",

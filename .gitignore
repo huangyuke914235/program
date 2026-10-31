@@ -1,5 +1,8 @@
 node_modules/
 .npm-cache/
+.maven-cache/
+java/target/
+receiver-ui/dist/
 dist/
 data/
 .env

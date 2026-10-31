@@ -1,34 +1,39 @@
 # RelayForge 架构与工程取舍
 
-RelayForge 把一个入站业务事件持久化为若干投递任务，再通过后台 worker 将它发送给 HTTP 接收端。管理界面调用同一套 API 展示任务状态和尝试历史。
+主实现由 Spring Boot 提供 API、SQLite 持久化队列、定时 worker 和本地订单接收示例。React 是管理端，Vue 是接收业务的展示端。两个前端都只通过 HTTP 访问后端，不直接访问数据库。
 
 ## 组件边界
 
-| 组件         | 职责                                                     |
-| ------------ | -------------------------------------------------------- |
-| Fastify API  | 认证、输入校验、端点管理、事件提交、查询与手动重放       |
-| SQLite Store | 事务、一致性约束、幂等记录、任务领取和状态持久化         |
-| Worker       | 领取到期任务、签名、调用传输层、分类结果和安排下一次尝试 |
-| HTTP 传输层  | 目标地址校验、DNS 与连接控制、超时、响应大小限制         |
-| React 界面   | 展示实际 API 数据，创建端点和事件，排查失败并执行重放    |
+| 组件 | 代码入口 | 职责 |
+| --- | --- | --- |
+| REST API | [ApiController.java](../java/src/main/java/com/relayforge/api/ApiController.java) | 端点、事件、投递、审计与演示数据 |
+| 认证与请求边界 | [AccessFilter.java](../java/src/main/java/com/relayforge/api/AccessFilter.java) | Bearer Token、基础限流、请求限制和本地演示访问控制 |
+| JDBC Store | [RelayStore.java](../java/src/main/java/com/relayforge/store/RelayStore.java) | 事务、幂等、领取、租约与完成状态 |
+| 数据结构 | [Models.java](../java/src/main/java/com/relayforge/store/Models.java) | 前后端交换的事件、端点、投递和尝试记录 |
+| Worker | [DeliveryWorker.java](../java/src/main/java/com/relayforge/worker/DeliveryWorker.java) | 定时领取任务、签名、调用传输层与安排重试 |
+| HTTP 传输 | [PinnedHttpTransport.java](../java/src/main/java/com/relayforge/worker/PinnedHttpTransport.java) | DNS 校验和固定地址连接、超时、响应大小限制 |
+| 签名与地址策略 | [WebhookSecurity.java](../java/src/main/java/com/relayforge/worker/WebhookSecurity.java) | HMAC 验签与目标 URL 检查 |
+| 业务接收示例 | [DemoReceiver.java](../java/src/main/java/com/relayforge/api/DemoReceiver.java) | 演示验签、去重、订单写入和本机只读查询 |
+| React 管理台 | [web/](../web/) | 配置端点、发布事件、排查投递和重放 |
+| Vue 订单工作台 | [receiver-ui/](../receiver-ui/) | 查询订单与接收记录，展示实际处理结果 |
 
-API 与 worker 可以在同一个进程内运行，也可以通过 `WORKER_ENABLED=false` 和独立 worker 进程分开。数据库文件是它们之间的持久化边界。
+当前 worker 在 Spring 进程内由调度器执行。`WORKER_ENABLED=false` 会关闭它；Java 版尚无独立 worker 启动命令。保留的 `server/` 是旧 Node 参考实现，不是当前主服务的一部分。
 
 ## 从一次提交到一次投递
 
-1. 客户端携带 `Authorization: Bearer <token>` 和 `Idempotency-Key` 提交事件。
-2. Store 在一个事务里检查幂等键、写入事件并写入所有目标端点的投递任务。
-3. worker 使用数据库事务领取一个到期任务，同时记录租约和本次尝试。
-4. worker 在事务外执行 HTTP POST；网络等待不会占住数据库写事务。
-5. HTTP 结果持久化为成功、等待重试或死信。状态回写需要匹配当前租约，防止旧 worker 覆盖新 worker 的结果。
+1. 业务客户端携带管理 Token 与 `Idempotency-Key` 提交事件。
+2. Store 在同一事务内检查幂等键、写入事件并为目标端点创建投递任务。
+3. worker 在短事务内领取一个到期任务，记录租约令牌和本次尝试。
+4. 在事务外构造消息、计算签名并发送 HTTP POST。
+5. 根据结果将任务标记为成功、等待重试或死信。回写必须匹配当前租约令牌。
 
-事件和任务一起提交解决了“事件已经保存，但任务没有创建”的双写问题。这里使用 SQLite 表作为持久化队列，没有引入独立消息代理。
+事件与任务一起提交，避免出现“事件保存了但任务丢了”的双写缺口。SQLite 表承担持久化队列的作用，没有另设消息代理。HTTP 请求不放在数据库事务中，避免网络等待长期占用写锁。
 
-## 幂等的范围
+## 幂等与事务
 
-同一个 `Idempotency-Key` 和相同的事件内容会返回既有事件，不创建新的投递任务。相同键携带不同内容会返回冲突。载荷对象的键顺序不应改变幂等判断；显式目标端点集合也应规范化。
+相同 `Idempotency-Key` 和相同事件内容会返回已有事件，不重复创建任务。相同键用于不同内容则返回冲突。载荷对象键顺序和显式端点集合会进行规范化后参与指纹计算。
 
-幂等键保护的是**事件创建操作**。它不能保证接收方只处理一次 HTTP 请求。接收方应对 `webhook-id` 建立持久化去重约束；如果同一事件会进入多个订阅端点，去重键应包含订阅/端点标识。
+这保护的是**事件创建操作**，无法保证远端只产生一次业务副作用。自动重试和手动重放都可能再次送达同一事件。接收方需要持久化去重；同一服务有多个订阅时，去重键通常应包含订阅/端点标识。
 
 ## 投递状态
 
@@ -40,75 +45,81 @@ stateDiagram-v2
     processing --> delivered: HTTP 2xx
     processing --> retrying: 暂时失败且仍有额度
     processing --> dead: 永久失败或达到上限
-    processing --> processing: 旧租约过期后恢复
+    processing --> processing: 租约过期后恢复
     delivered --> pending: 手动重放
     dead --> pending: 手动重放
 ```
 
-默认一轮最多尝试 5 次。网络错误、超时、HTTP `408`、`425`、`429` 和 `5xx` 可重试；其他非 `2xx` 响应视为终止失败。重定向不会自动跟随。重试使用带随机抖动的指数退避，等待时间封顶，减少多个失败任务同时冲击接收方的机会。
+默认每轮最多尝试 5 次。网络错误、超时、HTTP `408`、`425`、`429` 与 `5xx` 可重试；其他非 `2xx` 结果终止。重定向不跟随。重试使用带随机抖动的指数退避，等待时间封顶 60 秒。
 
-手动重放只接受已成功或已死信的任务，保留历史记录并重新开始一轮尝试。它使用同一个事件 ID，因此具备去重逻辑的接收方可能直接忽略已经处理过的事件；“重放”并不强制再次产生业务副作用。
+只有已成功或已死信的任务允许手动重放。重放保留历史记录、重新计算本轮次数，并继续使用同一事件 ID。具备去重逻辑的接收方会忽略已经处理过的事件，不会因为点击重放而必然再执行业务。
 
-## 租约、恢复与至少一次语义
+## 租约与至少一次语义
 
-领取任务时，短事务设置租约令牌和到期时间。没有崩溃时，该 worker 在网络超时界限内结束投递并持久化结果。如果进程消失，其他 worker 可在租约过期后恢复该任务。回写结果时必须核对令牌，旧 worker 即使稍后恢复，也不能覆盖新租约下的状态。
+领取时写入租约令牌和到期时间。worker 崩溃后，任务可在租约到期后被恢复。旧 worker 稍后恢复时，其令牌已经失效，不能覆盖新 worker 的处理结果。
 
-这保障任务不会因为进程退出而永久卡住，但不能把远端业务事务与本地事务合为一个原子操作：
+租约不能把远端业务事务和本地状态事务变成一个原子操作：
 
 ```text
-接收方处理成功 → 发送方进程崩溃 → 本地成功状态未写入 → 任务重试
+接收方提交业务成功 → 发送方崩溃 → 本地成功状态未写入 → 租约到期后再次投递
 ```
 
-因此本项目采用至少一次投递语义。接收方的幂等处理是协议的一部分。
+因此项目采用至少一次投递语义，接收方的幂等是完整方案的一部分。端点暂停阻止后续任务领取，不会撤销已经发出的 HTTP 请求。
 
 ## 签名协议
 
-每个端点有独立签名密钥。创建端点时 API 只在创建响应中返回密钥，常规列表不返回密钥。
+每个端点拥有独立密钥，创建响应返回一次，普通列表不包含密钥。
 
-| 请求头                | 内容                                |
-| --------------------- | ----------------------------------- |
-| `webhook-id`          | 事件 ID；自动重试和手动重放保持相同 |
-| `webhook-delivery-id` | 投递任务 ID                         |
-| `webhook-timestamp`   | 当前尝试的 Unix 秒级时间戳          |
-| `webhook-signature`   | `v1=` 加十六进制 HMAC-SHA256        |
+| 请求头 | 内容 |
+| --- | --- |
+| `webhook-id` | 事件 ID，重试和重放不变 |
+| `webhook-delivery-id` | 投递任务 ID |
+| `webhook-timestamp` | 当前尝试的 Unix 秒级时间戳 |
+| `webhook-signature` | `v1=` 加 HMAC-SHA256 十六进制摘要 |
 
-待签名消息是 **时间戳字符串 + `.` + 原始 HTTP 请求体**。不能先解析 JSON 再重新序列化后验证，因为空格和字段顺序都可能改变字节。
-
-```js
-import { createHmac, timingSafeEqual } from "node:crypto";
-
-export function verifyWebhook({ rawBody, timestamp, signature, secret }) {
-  if (!/^\d+$/.test(timestamp ?? "")) return false;
-  // 示例窗口为 5 分钟；部署时确保接收方时钟同步。
-  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false;
-  if (!/^v1=[a-f0-9]{64}$/.test(signature ?? "")) return false;
-  const expected = createHmac("sha256", secret)
-    .update(`${timestamp}.${rawBody}`)
-    .digest();
-  const actual = Buffer.from(signature.slice(3), "hex");
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
-}
+```text
+签名消息 = timestamp + "." + 原始 HTTP 请求体
+签名算法 = HMAC-SHA256(endpointSecret, 签名消息的 UTF-8 字节)
 ```
 
-生产接收端还应限制请求体大小、拒绝缺失或重复的签名头，并先验证签名再处理业务。签名验证通过后，仍需要持久化事件去重，时间窗口本身无法避免窗口内的重放。
+接收方应保留原始请求体，不能先解析再序列化 JSON 后验签。时间戳示例窗口为 5 分钟，摘要采用常量时间比较。实际实现可阅读 `WebhookSecurity.sign`、`verifySignature` 和 `DemoReceiver.receive`。
 
-## 出站请求安全
+签名头和 JSON 事件 ID 必须与收到的事件一致。验签通过后再执行业务，并将事件去重记录与业务写入放在同一个数据库事务中。时间窗口只限制旧请求的重放，无法替代窗口内的持久化去重。
 
-Webhook 目标由用户输入，因此 HTTP 客户端不能直接无条件访问任意地址。目标 URL 和 DNS 解析结果都需要校验，私网、回环、链路本地等非公网地址默认拒绝；连接应使用已校验的目标地址，以避免校验之后重新解析到其他地址。重定向不自动跟随。
+## Vue 接收示例的业务事务
 
-演示模式为内置的本机接收端提供严格限定的例外，用于在没有互联网的情况下展示成功和重试。这个例外不是允许任意访问内网的开关；对外部署请关闭 `DEMO_MODE`。
+创建演示数据会注册 `good`、`flaky`、`reject`、`shop` 四个端点。`shop` 接收 `order.created`，验证 `orderId`、非负整数 `amount` 和三位货币代码；金额采用最小货币单位，例如 `29900 CNY` 显示为 `¥299.00`。
 
-## 数据与密钥
+处理流程：
 
-数据库保存事件原始载荷、目标地址、投递结果和端点签名密钥。响应体只保留受限的片段，错误信息也会限制长度。事件载荷和响应片段仍可能包含业务敏感信息，卷权限、备份与数据保留策略由部署者负责。
+1. 使用目标端点密钥验证原始消息签名。
+2. 在事务中尝试插入 `demo_receipts`，唯一键为 `(eventId, endpointId)`。
+3. 只有首次插入成功才更新 `demo_orders`；重复消息返回成功但不会再次更新业务。
+4. Vue 通过 `/receiver/api/orders` 与 `/receiver/api/receipts` 查询最近记录。
 
-管理 API 使用单个共享 Token，前端保存在当前浏览器会话存储中。当前版本不支持多用户权限隔离、自动凭据轮换或应用层密钥加密，不能据此宣称具备完整的多租户平台安全能力。
+接收示例与投递系统暂时位于同一个 Spring Boot 应用和 SQLite 中，方便本机运行；Vue 不是独立业务后端。查询要求演示模式开启且请求来自 loopback。数据没有管理 Token 保护，因此这些查询不适合直接对外开放。接收记录保存唯一处理事件，不是每一次 HTTP 到达的完整日志。
 
-## 为什么选择这些技术
+## 出站请求边界
 
-- **TypeScript 全栈**：API 与界面共享一种语言，严格类型检查有助于控制接口变更。
-- **Fastify**：提供路由、结构化日志和测试注入能力；核心业务逻辑仍放在独立 Store/worker 中。
-- **SQLite WAL**：无需外部数据库，事务和约束足以支撑单机队列。短同步查询易于审计，但写入并发、事件循环阻塞和单文件存储都是扩展边界。
-- **React + Vite**：支持状态驱动的操作界面，开发服务器与生产静态资源构建方式清晰。
+目标 URL 由用户输入，因此传输层不能直接访问任意地址。注册阶段检查 URL 协议、凭据、片段和明确的危险地址；发送前解析 DNS 并检查全部地址，再将连接固定到已校验的地址。Host、TLS SNI 与证书验证仍使用原主机名，连接阶段不会再次查询系统 DNS。
 
-当事件量或租户数量增长时，合理的下一步是先补监控与容量测量，再评估 PostgreSQL、独立消息队列、密钥管理服务和租户模型，而不是只替换数据库名称。
+当前 DNS 等待上限为 3 秒，HTTP 交换上限为 10 秒；DNS 执行器也限制线程数，避免无法中断的本地解析无限积累。响应内容最多保留 4 KiB，读取超过 1 MiB 则终止。HTTP 客户端不自动跟随重定向或进行额外自动重试。
+
+演示模式只为 `http://127.0.0.1:<PORT>/api/demo/receiver/{good|flaky|reject|shop}` 提供限定例外。它不允许任意内网目标。对外部署前关闭演示模式。
+
+## 存储、配置与迁移
+
+核心 SQL 位于 [V1__schema.sql](../java/src/main/resources/db/migration/V1__schema.sql)。这里使用 JDBC 执行建表语句与版本检查，并未引入 Flyway；文件路径不代表运行了 Flyway 迁移框架。
+
+数据库保存事件载荷、端点密钥、响应片段和审计记录。密钥没有应用层加密，事件内容也可能包含敏感信息，需要保护数据卷、备份并规划保留期限。管理端只有共享 Token，前端在会话存储中保存它，没有多租户和 RBAC。
+
+Java 沿用旧版核心表名与字段。跨语言规范化、数字表达、历史幂等指纹等兼容性必须通过专门样例验证，不能把表结构相同理解为所有历史数据无条件兼容。切换前应停止旧实例并备份，先用副本验证；不要混跑 Node 与 Java 实例写同一个数据库。
+
+## 技术选择与扩展边界
+
+- **Spring Boot / Java**：使用 REST Controller、Bean Validation、JDBC 和定时任务组织后端；可据此学习常见 Java 工程分层。
+- **SQLite WAL**：减少本地运行依赖，提供事务与唯一约束。单文件、写锁竞争和单机存储是扩展边界。
+- **React 管理台**：管理任务与排障，保持 API 契约使后端替换过程可观察。
+- **Vue 订单工作台**：从业务接收方视角展示处理结果，重点是验签、去重和订单更新。
+
+当吞吐或租户规模增加时，先测量队列等待、写锁与失败分布，再评估 PostgreSQL、独立消息代理、租户模型和密钥管理服务。当前实现没有宣称跨主机调度、恰好一次处理或生产级多租户能力。

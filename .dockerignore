@@ -3,6 +3,9 @@
 .env.*
 node_modules
 .npm-cache
+.maven-cache
+java/target
+receiver-ui
 dist
 data
 output

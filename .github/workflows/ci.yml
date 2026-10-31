@@ -8,7 +8,39 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  spring-backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+          cache-dependency-path: java/pom.xml
+      - run: mvn -B -ntp -f java/pom.xml verify
+
+  frontends:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            receiver-ui/package-lock.json
+      - run: npm ci
+      - run: npm run build:web
+      - run: npm ci
+        working-directory: receiver-ui
+      - run: npm run build
+        working-directory: receiver-ui
+
+  legacy-node-reference:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -18,4 +50,5 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run check
+      - run: npm run typecheck:legacy
+      - run: npm run test:legacy

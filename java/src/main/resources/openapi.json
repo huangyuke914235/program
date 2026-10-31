@@ -1,0 +1,333 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "RelayForge API",
+    "version": "2.0.0",
+    "description": "Reliable webhook delivery. Authenticate with the workspace API token. Delivery is at least once."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "summary": "Liveness and database check",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Healthy"
+          }
+        }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "summary": "Public UI configuration",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "demoMode flag"
+          }
+        }
+      }
+    },
+    "/api/stats": {
+      "get": {
+        "summary": "Queue counts and 24-hour activity",
+        "responses": {
+          "200": {
+            "description": "DashboardStats"
+          }
+        }
+      }
+    },
+    "/api/endpoints": {
+      "get": {
+        "summary": "List endpoints (secrets excluded)",
+        "responses": {
+          "200": {
+            "description": "{ items: Endpoint[] }"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create endpoint; signing secret returned once",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "url"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 80
+                  },
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Endpoint and secret"
+          },
+          "400": {
+            "description": "Invalid destination"
+          }
+        }
+      }
+    },
+    "/api/endpoints/{id}": {
+      "patch": {
+        "summary": "Pause or resume an endpoint",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "enabled"
+                ],
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Endpoint"
+          },
+          "404": {
+            "description": "Missing endpoint"
+          }
+        }
+      }
+    },
+    "/api/events": {
+      "get": {
+        "summary": "List most recent events",
+        "responses": {
+          "200": {
+            "description": "{ items: EventRecord[] }"
+          }
+        }
+      },
+      "post": {
+        "summary": "Atomically accept event and queue deliveries",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "type",
+                  "payload"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "example": "order.created"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "endpointIds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Duplicate event, original deliveries"
+          },
+          "201": {
+            "description": "New event and deliveries"
+          },
+          "409": {
+            "description": "Key reused with different input"
+          }
+        }
+      }
+    },
+    "/api/deliveries": {
+      "get": {
+        "summary": "List deliveries",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "processing",
+                "retrying",
+                "delivered",
+                "dead"
+              ]
+            }
+          },
+          {
+            "name": "eventId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ items: Delivery[], total: number }"
+          }
+        }
+      }
+    },
+    "/api/deliveries/{id}": {
+      "get": {
+        "summary": "Delivery, event payload and attempt history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ delivery, event, attempts }"
+          },
+          "404": {
+            "description": "Missing delivery"
+          }
+        }
+      }
+    },
+    "/api/deliveries/{id}/retry": {
+      "post": {
+        "summary": "Replay a delivered or dead delivery",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Queued delivery; attempt history retained"
+          },
+          "409": {
+            "description": "Already queued or processing"
+          }
+        }
+      }
+    },
+    "/api/audit": {
+      "get": {
+        "summary": "Recent control-plane audit entries",
+        "responses": {
+          "200": {
+            "description": "{ items: AuditEntry[] }"
+          }
+        }
+      }
+    },
+    "/api/demo/bootstrap": {
+      "post": {
+        "summary": "Create demo endpoints and send an order event (demo mode only)",
+        "responses": {
+          "201": {
+            "description": "Demo seeded"
+          },
+          "404": {
+            "description": "Demo disabled"
+          }
+        }
+      }
+    }
+  }
+}

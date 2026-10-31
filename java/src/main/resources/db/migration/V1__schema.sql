@@ -1,0 +1,10 @@
+CREATE TABLE IF NOT EXISTS endpoints (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, secret TEXT NOT NULL, createdAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, type TEXT NOT NULL, payload TEXT NOT NULL, idempotencyKey TEXT NOT NULL UNIQUE, requestHash TEXT NOT NULL, createdAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, eventId TEXT NOT NULL REFERENCES events(id), endpointId TEXT NOT NULL REFERENCES endpoints(id), endpointUrl TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','retrying','delivered','dead')), attempts INTEGER NOT NULL DEFAULT 0, maxAttempts INTEGER NOT NULL, nextAttemptAt TEXT, lastStatusCode INTEGER, lastError TEXT, leaseToken TEXT, leaseExpiresAt TEXT, activeAttemptId TEXT, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL, UNIQUE(eventId,endpointId));
+CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, deliveryId TEXT NOT NULL REFERENCES deliveries(id), number INTEGER NOT NULL, startedAt TEXT NOT NULL, finishedAt TEXT, statusCode INTEGER, durationMs INTEGER, error TEXT, responseBody TEXT, UNIQUE(deliveryId,number));
+CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, action TEXT NOT NULL, resourceId TEXT NOT NULL, createdAt TEXT NOT NULL, detail TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS deliveries_due ON deliveries(status,nextAttemptAt);
+CREATE INDEX IF NOT EXISTS deliveries_leases ON deliveries(status,leaseExpiresAt);
+CREATE INDEX IF NOT EXISTS deliveries_event ON deliveries(eventId);
+CREATE INDEX IF NOT EXISTS attempts_delivery ON attempts(deliveryId,number);
+PRAGMA user_version = 1;
